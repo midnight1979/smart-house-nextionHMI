@@ -238,10 +238,10 @@ const int StreetTankRelay    = 1;          // Насос уличных емко
 const int HotWaterTankRelay  = 2;          // Электроклапан емкости с горячей водой (2-порт)
 
 const int DirtyWaterRelay      = 4;          // Реле клапана грязной воды
-const int CleanWaterRelay      = 5;          // Реле клапана чистой воды
+const int CleanWaterRelay      = 3;          // Реле клапана чистой воды
 
 // Резерв портов на блоке реле - в последующем дать переменным нормальные имена
-const int port4              = 3;
+const int port4              = 5;   //Реле пока не работает (неисправность реле)
 const int port7              = 6;
 const int port8              = 7;
 
@@ -251,13 +251,12 @@ uint32_t numberProgressBar      = 0;          // Значение передав
 unsigned long previousMillisHMI = 0;          // Переменная дла организации задержки при цикле визуализации наполнения
 const long intervalHMI          = 500;        // Интервал цикла визуализации HMI Nextion
 char buffer[100] = {0};
-bool ImpulseUpdated             = false;
+bool ImpulseUpdated             = false;      // Флаг обновления импульса со входа прерывания (interupt)
 
 /* Переменные аппаратных входов */
 #define impulsePin 2             // Цифровой вход для подачи импульсов от счетчика для защиты насоса от сухого хода
 #define SkvajinaPin 10           // Выход включения насоса - подключается к автоматике скважины (HIGH-включено/LOW-выключено)
 #define TurbiditySensorPin A0    // Аналоговый вход с датчика прозрачности
-//#define StartButtonPin 11       // Использовался при отладке с аппаратной кнопкой включения насоса скважины
 
 /* Переменные значений входов и выходов */
 int Turbidity   = 0;                   // Переменная для получения значений датчика прозрачности
@@ -265,20 +264,30 @@ int Turbidity   = 0;                   // Переменная для получ
 /* Служебные переменные и константы */
 const long intervalDryWork        = 15000;   // Интервал за который проверяется количество импульсов счетчика (15 сек.) - защита насоса скважины от сухого хода
 unsigned long previousMillisSKV   = 0;       // Переменная для хранения интервала для подсчета импульсов
-const int minTurbidity            = 350;     // Минимальное значение прозрачности (всё что меньше будет сливаться в дренаж)
+const int minTurbidity            = 250;     // Минимальное значение прозрачности (всё что меньше будет сливаться в дренаж)
 
 int impulses            = 0;          // Переменная для подсчета импульсов внутри интервала (10 сек).
 int CommulativeImpulses = 0;          // Накопительный счетчик импульсов - собирается за сеанс "откачки" (от старта до стопа!)
 bool SkvajNasos         = false;      // Скважинный насос ВКЛ/ВЫКЛ
 
-NexText t0         = NexText(0, 15, "t9");            // текстовое поле проценты емкости
-NexText t10        = NexText(0, 16, "t10");           // текстовое поле импульсы
-NexText t11        = NexText(0, 17, "t11");           // текстовое поле литры
-NexProgressBar j0  = NexProgressBar(0, 1, "j0");
-NexButton btnStart = NexButton(0, 14, "b0");
-NexCrop q0 = NexCrop(0, 7, "q0");       // Индикатор импульсов
-NexCrop q1 = NexCrop(0, 12, "q1");      // Чистая
-NexCrop q2 = NexCrop(0, 13, "q2");      // грязная
+/* Служебные компоненты ProgressBar, Timer, Button */
+NexTimer        tm0       = NexTimer(0, 14, "tm0");
+NexProgressBar  j0        = NexProgressBar(0, 2, "j0");
+NexButton       btnStart  = NexButton(0, 13, "b0");
+
+/* Поля вывод числовых значений */
+NexNumber n0 = NexNumber(0, 1, "n0");                 // поле проценты емкости
+NexNumber n1 = NexNumber(0, 3, "n1");                 // поле температура улицы
+NexNumber n2 = NexNumber(0, 4, "n2");                 // поле температура в доме
+NexNumber n3 = NexNumber(0, 5, "n3");                 // поле импульсы
+NexNumber n4 = NexNumber(0, 9, "n4");                 // поле литры чистой воды
+
+/* Индикаторы */
+NexCrop q0 = NexCrop(0, 8, "q2");      // Индикатор импульсов
+NexCrop q1 = NexCrop(0, 6, "q0");      // Чистая вода
+NexCrop q2 = NexCrop(0, 7, "q1");      // Грязная вода
+NexCrop q3 = NexCrop(0, 11, "q3");     // Наполнение в дом
+
 bool updateHMI = false;
 const int litresKoeff = 70;             // Коэффициент пересчета ипульсов в литры
 
@@ -290,15 +299,29 @@ NexTouch *nex_listen_list[] =
 
 void buttonStartCallback(void *ptr)
 {
-  if (SkvajNasos == false) {
-    btnStart.setText("STOP");
+
+  // При нажатии на кнопку устанавливаем яркость экрана на максимум
+  nexSerial.print("dim=100");
+  nexSerial.write(0XFF);
+  nexSerial.write(0XFF);
+  nexSerial.write(0XFF);
+
+  // Включаем внутренний таймер сна (снижение яркости до 40% через 15 сек.)
+  tm0.enable();
+
+  // Если скважина выключена - включаем, изменяем картинки кнопки на вкл.
+  if (SkvajNasos == false)
+  {
+    btnStart.Set_background_crop_picc(1);
+    btnStart.Set_press_background_crop_picc2(0);
     SkvajNasos = true;
     impulses = 0;
     CommulativeImpulses = 0;
   }
   else
   {
-    btnStart.setText("START");
+    btnStart.Set_background_crop_picc(0);
+    btnStart.Set_press_background_crop_picc2(0);
     SkvajNasos = false;
     updateHMI = true;
   }
@@ -321,9 +344,12 @@ int street_Temp       = 0;        // Температура воздуха на 
 // Процедура "посаженная" на прерывание 2-го цифрового входа для подсчета импульсов с датчика
 void flow()
 {
-  impulses++;
-  CommulativeImpulses++;
-  ImpulseUpdated = true;
+  if (SkvajNasos == true)
+  {
+    impulses++;
+    CommulativeImpulses++;
+    ImpulseUpdated = true;
+  }
 }
 
 void setup()
@@ -416,8 +442,6 @@ void setup()
 
   CurrentPage = 1;                // Инициализируем всегда 1-ю страницу при включении
 
-  Serial.begin(115200); // Starting Serial Terminal
-
   // Инициализируем PIN для кнопок
   pinMode(NextPageButtonPin, INPUT_PULLUP);
 
@@ -427,11 +451,11 @@ void setup()
   attachInterrupt(0, flow, RISING);
   sei();
 
-  //pinMode(StartButtonPin, INPUT);         // в случае использования аппаратной кнопки включения насоса скважины
-
-  // Инициализация дисплея HMI Nextion
+  // Инициализация дисплея HMI Nextion - установка по умолчанию скорости 115200
+  // Serial.print("bauds=115200");
+  // Serial.write( nex_msg_end, 3);
   nexInit();
-  btnStart.attachPop(buttonStartCallback);
+  btnStart.attachPop(buttonStartCallback, &btnStart);
 }
 
 void loop()
@@ -473,9 +497,8 @@ void loop()
 
   /*-------------------- BEGIN Блок работы скважины/HMI Nextion ----------------*/
   TurbidityCheck();                   // Проверка прозрачности
-  //StartSkvajinaRequest();             // Процедура старта насоса скважины - стартует по значению переменной SkvajNasos == true - исопользовалась при работе с аппаратной кнопкой включения
   ScanImpulse();                      // Защита от сухого хода
-  ProcessHMI();
+  ProcessHMI();                       // Обновление вывода на экран Nextion
   /*--------------------- END Блок работы скважины/HMI Nextion -----------------*/
 
   /* Вывод страниц на LCD */
@@ -490,31 +513,30 @@ void loop()
   WriteStates();
 }   /* END LOOP */
 
-/* Процедура включения скважинного насоса */
-//void StartSkvajinaRequest()
-//{
-//  int StartSkvajinaButton = 0;                          // Переменная для кнопки включения скважины
-//  StartSkvajinaButton = digitalRead(StartButtonPin);
-//  if (StartSkvajinaButton  == HIGH) {
-//    if (SkvajNasos == false)
-//    {
-//      CommulativeImpulses = 0;
-//      Serial.println("START NASOS");
-//      SkvajNasos = true;
-//    }
-//    else
-//    {
-//      Serial.println("STOP NASOS");
-//      SkvajNasos = false;
-//    }
-//  }
-//}
-
 void ProcessHMI() {
   unsigned long currentMillis = millis();
 
   if (currentMillis - previousMillisHMI >= intervalHMI) {
     previousMillisHMI = currentMillis;
+
+    n1.setValue(street_Temp);
+    n2.setValue(home_air_Temp);
+
+    if (MainTankStatus == 2)
+    {
+      if (progress == 3)
+      {
+        q3.setPic(1);
+      }
+      else
+      {
+        q3.setPic(0);
+      }
+    }
+    else
+    {
+      q3.setPic(0);
+    }
 
     if (SkvajNasos == true) {
       if (numberProgressBar >= 100) {
@@ -531,9 +553,7 @@ void ProcessHMI() {
         numberProgressBar = numberProgressBar + 1;
       }
       j0.setValue(numberProgressBar);
-      memset(buffer, 0, sizeof(buffer));
-      itoa(StreetTankPercent, buffer, 10);
-      t0.setText(buffer);
+      n0.setValue(StreetTankPercent);
     }
     else
     {
@@ -544,9 +564,7 @@ void ProcessHMI() {
       {
         numberProgressBar = StreetTankPercent;
       }
-      memset(buffer, 0, sizeof(buffer));
-      itoa(StreetTankPercent, buffer, 10);
-      t0.setText(buffer);
+      n0.setValue(StreetTankPercent);
       j0.setValue(numberProgressBar);
     }
   }
@@ -585,17 +603,14 @@ void TurbidityCheck()
       q0.setPic(0);
       q1.setPic(0);
       q2.setPic(0);
-      btnStart.setText("START");
+      btnStart.Set_background_crop_picc(0);
+      btnStart.Set_press_background_crop_picc2(1);
 
       // Выводим количество импульсов за сеанс закачки
-      memset(buffer, 0, sizeof(buffer));
-      itoa(CommulativeImpulses, buffer, 10);
-      t10.setText(buffer);
+      n3.setValue(CommulativeImpulses);
 
       // Выводим количество литров за сеанс закачки
-      memset(buffer, 0, sizeof(buffer));
-      itoa(CommulativeImpulses / litresKoeff, buffer, 10);
-      t11.setText(buffer);
+      n4.setValue(CommulativeImpulses / litresKoeff);
 
       updateHMI = false;
     }
@@ -610,14 +625,10 @@ void ScanImpulse()
   if (ImpulseUpdated == true) {
 
     // Выводим текущие показания импульсов
-    memset(buffer, 0, sizeof(buffer));
-    itoa(CommulativeImpulses, buffer, 10);
-    t10.setText(buffer);
+    n3.setValue(CommulativeImpulses);
 
     // Выводим текущие показания литров
-    memset(buffer, 0, sizeof(buffer));
-    itoa(CommulativeImpulses / litresKoeff, buffer, 10);
-    t11.setText(buffer);
+    n4.setValue(CommulativeImpulses / litresKoeff);
 
     if (progress == 1) {
       q0.setPic(1); //digitalWrite(ledPin, HIGH);
@@ -667,22 +678,16 @@ void TurnSkvajNasosOff() {
 }
 
 void DirtyWater() {
-  //digitalWrite(DirtyWaterRelay, HIGH);
-  //digitalWrite(CleanWaterRelay, LOW);
   TurnOn(DirtyWaterRelay);
   TurnOff(CleanWaterRelay);
 }
 
 void CleanWater() {
-  //digitalWrite(CleanWaterRelay, HIGH);
-  //digitalWrite(DirtyWaterRelay, LOW);
   TurnOn(CleanWaterRelay);
   TurnOff(DirtyWaterRelay);
 }
 
 void CloseWaterValves() {
-  //digitalWrite(CleanWaterRelay, LOW);
-  //digitalWrite(DirtyWaterRelay, LOW);
   TurnOff(CleanWaterRelay);
   TurnOff(DirtyWaterRelay);
 }
@@ -1046,6 +1051,10 @@ void SystemCounters()
   if ((currentMillis - previousMillisBLK >= BrightnessInterval) && (SleepMode == false)) {
     previousMillisBLK = currentMillis;
     LED12864_Brightness(SleepBrightness);
+    //nexSerial.print("dim=40");
+    //nexSerial.write(0XFF);
+    //nexSerial.write(0XFF);
+    //nexSerial.write(0XFF);
     SleepMode = true;
   }
 
@@ -1092,6 +1101,11 @@ void ProcessButtons()
       LongTapNext = 1;
       SleepMode = false;
       LED12864_Brightness(WorkBrightness);
+      nexSerial.print("dim=100");
+      nexSerial.write(0XFF);
+      nexSerial.write(0XFF);
+      nexSerial.write(0XFF);
+      tm0.enable();
       previousMillisBLK = millis();
     }
   }
@@ -1323,9 +1337,9 @@ void SaunaStonesTemperature()
 
 void i2cReadSlave()
 {
-  const int argCount = 9;             // Количество аргументов массива получаемых со Slave-контроллера !!!Обязательно проверить размерность на соответствие с кодом Slave'а
-  int respVals[argCount];             // Создаем переменную (массив - размерность = argCount) для получения данных со Slave-контроллера
-  Wire.requestFrom(8, argCount);      // Запрашиваем "argCount" байт из Slave-контроллера по i2c адрес #8
+  const int argCount = 10;             // Количество аргументов массива получаемых со Slave-контроллера !!!Обязательно проверить размерность на соответствие с кодом Slave'а
+  int respVals[argCount];              // Создаем переменную (массив - размерность = argCount) для получения данных со Slave-контроллера
+  Wire.requestFrom(8, argCount);       // Запрашиваем "argCount" байт из Slave-контроллера по i2c адрес #8
   uint8_t respIoIndex = 0;
 
   while (Wire.available())
@@ -1353,9 +1367,10 @@ void i2cReadSlave()
 
     wq_raw = respVals[5];
 
-    sauna_air_Temp = respVals[6];
-    sauna_water_Temp = respVals[7];
-    street_Temp = respVals[8];
+    sauna_air_Temp    = respVals[6];
+    sauna_water_Temp  = respVals[7];
+    street_Temp       = respVals[8];
+    home_air_Temp     = respVals[9];
     //Serial.println(street_Temp);
   }
 }
