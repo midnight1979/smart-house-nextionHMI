@@ -1,4 +1,4 @@
-//#include <DS3231.h>
+#include <DS3231.h>
 #include <PCF8574.h>      // Для PCF8574
 #include <U8glib.h>       // Для OLED-дисплея
 #include <EEPROM.h>       // Для работы с EEPROM
@@ -6,16 +6,13 @@
 #include <Nextion.h>
 
 /* DS3231 */
-//DS3231 clock;
+DS3231 clock;
+RTCDateTime dt;
 
 /* Переменные работы кнопок */
 #define NextPageButtonPin 9               // Вход к которому подключена кнопка "Далее"
 
-// Временно убрал PIN с кнопки, т.к. планируется сделать блок кнопок с резисторами и подключением к одному порту (PIN 2) - PIN3 - теперь используется в регулировке подсветки LCD12864
-//#define PrevPageButtonPin 3             // Вход к которому подключена кнопка "Назад"
-
 int LongTapNext = 0;                      // Флаг для длительного нажатия кнопки - чтобы при удержании "Далее"/"Назад" не было цикличного перехода по страницам
-//int LongTapPrev = 0;                      // Флаг для длительного нажатия кнопки - чтобы при удержании "Далее"/"Назад" не было цикличного перехода по страницам
 
 // Инициализация LCD12864 (SPI)
 U8GLIB_ST7920_128X64_4X u8g(13, 5, 4);
@@ -205,7 +202,6 @@ int HotWater_Unblock      = 70;             // Количество воды в 
 int StreetTank_Height         = 110;         // Высота домашней емкости в см.
 int StreetTank_Max            = 10;         // Максимальный уровень воды домашней емкости в см. (от датчика до поверхности воды)
 int StreetTank_MinBlock       = 15;         // Минимальное количество воды уличной емкости в % чтобы заблокировать работу насоса
-int StreetTank_WaterQuality   = 0;          // Качество воды в уличных емкостях (прозрачность)
 
 //-------- Статусы емкостей ---------
 int MainTankStatus = 1;                     // Статус домашней емкости
@@ -250,7 +246,6 @@ const int port8              = 7;
 uint32_t numberProgressBar      = 0;          // Значение передаваемое в Nextion для визуализации наполнения скважины
 unsigned long previousMillisHMI = 0;          // Переменная дла организации задержки при цикле визуализации наполнения
 const long intervalHMI          = 500;        // Интервал цикла визуализации HMI Nextion
-char buffer[100] = {0};
 bool ImpulseUpdated             = false;      // Флаг обновления импульса со входа прерывания (interupt)
 
 /* Переменные аппаратных входов */
@@ -266,9 +261,11 @@ const long intervalDryWork        = 15000;   // Интервал за котор
 unsigned long previousMillisSKV   = 0;       // Переменная для хранения интервала для подсчета импульсов
 const int minTurbidity            = 250;     // Минимальное значение прозрачности (всё что меньше будет сливаться в дренаж)
 
-int impulses            = 0;          // Переменная для подсчета импульсов внутри интервала (10 сек).
-int CommulativeImpulses = 0;          // Накопительный счетчик импульсов - собирается за сеанс "откачки" (от старта до стопа!)
-bool SkvajNasos         = false;      // Скважинный насос ВКЛ/ВЫКЛ
+int impulses              = 0;          // Переменная для подсчета импульсов внутри интервала (10 сек).
+int CommulativeImpulses   = 0;          // Накопительный счетчик импульсов - собирается за сеанс "откачки" (от старта до стопа!)
+int CommulativeImpulsesD  = 0;          // Накопительный счетчик импульсов грязной воды
+int CommulativeImpulsesC  = 0;          // Накопительный счетчик импульсов чистой воды
+bool SkvajNasos         = false;        // Скважинный насос ВКЛ/ВЫКЛ
 
 /* Служебные компоненты ProgressBar, Timer, Button */
 NexTimer        tm0       = NexTimer(0, 14, "tm0");
@@ -281,6 +278,7 @@ NexNumber n1 = NexNumber(0, 3, "n1");                 // поле темпера
 NexNumber n2 = NexNumber(0, 4, "n2");                 // поле температура в доме
 NexNumber n3 = NexNumber(0, 5, "n3");                 // поле импульсы
 NexNumber n4 = NexNumber(0, 9, "n4");                 // поле литры чистой воды
+NexNumber n5 = NexNumber(0, 10, "n5");                // поле литры грязной воды
 
 /* Индикаторы */
 NexCrop q0 = NexCrop(0, 8, "q2");      // Индикатор импульсов
@@ -297,14 +295,19 @@ NexTouch *nex_listen_list[] =
   NULL
 };
 
-void buttonStartCallback(void *ptr)
+void setMaxBrightnessNex()
 {
-
-  // При нажатии на кнопку устанавливаем яркость экрана на максимум
   nexSerial.print("dim=100");
   nexSerial.write(0XFF);
   nexSerial.write(0XFF);
   nexSerial.write(0XFF);
+}
+
+void buttonStartCallback(void *ptr)
+{
+
+  // При нажатии на кнопку устанавливаем яркость экрана на максимум
+  setMaxBrightnessNex();
 
   // Включаем внутренний таймер сна (снижение яркости до 40% через 15 сек.)
   tm0.enable();
@@ -317,6 +320,8 @@ void buttonStartCallback(void *ptr)
     SkvajNasos = true;
     impulses = 0;
     CommulativeImpulses = 0;
+    CommulativeImpulsesD = 0;
+    CommulativeImpulsesC = 0;
   }
   else
   {
@@ -334,7 +339,7 @@ int dataA                     = 0;    // Upper byte температуры
 int dataB                     = 0;    // Lower Byte температуры
 
 // Температура воздуха с модуля RTC
-int home_air_Temp  = 0;
+//int home_air_Temp  = 0;
 
 // Температуры с терморезисторов
 int sauna_air_Temp    = 0;        // Температура воздуха в парилке
@@ -347,6 +352,14 @@ void flow()
   if (SkvajNasos == true)
   {
     impulses++;
+    if (Turbidity < minTurbidity)
+    {
+      CommulativeImpulsesD++;
+    }
+    else
+    {
+      CommulativeImpulsesC++;
+    }
     CommulativeImpulses++;
     ImpulseUpdated = true;
   }
@@ -456,6 +469,12 @@ void setup()
   // Serial.write( nex_msg_end, 3);
   nexInit();
   btnStart.attachPop(buttonStartCallback, &btnStart);
+
+  /* Initialize DS3231 */
+  clock.begin();
+  // Set sketch compiling time
+  //clock.setDateTime(__DATE__, __TIME__); // - занимает большой объем в памяти - исключил
+
 }
 
 void loop()
@@ -470,6 +489,9 @@ void loop()
   //    //Serial.println(StreetTank_WaterQuality, DEC);
   //    Serial.println(HotWaterTankPercent, DEC);
   //  }
+
+  // Считываем текущую дату и время
+  dt = clock.getDateTime();
 
   // Опрос событий с HMI Nextion
   nexLoop(nex_listen_list);
@@ -491,9 +513,7 @@ void loop()
   SaunaStonesTemperature();
 
   // Получение показаний температуры в доме с RTC
-  HomeAirTemp();
-
-  StreetTankWaterQualityCheck();
+  //HomeAirTemp();
 
   /*-------------------- BEGIN Блок работы скважины/HMI Nextion ----------------*/
   TurbidityCheck();                   // Проверка прозрачности
@@ -520,7 +540,8 @@ void ProcessHMI() {
     previousMillisHMI = currentMillis;
 
     n1.setValue(street_Temp);
-    n2.setValue(home_air_Temp);
+    //n2.setValue(home_air_Temp);
+    n2.setValue(clock.readTemperature());
 
     if (MainTankStatus == 2)
     {
@@ -550,7 +571,7 @@ void ProcessHMI() {
       }
       else
       {
-        numberProgressBar = numberProgressBar + 1;
+        numberProgressBar = numberProgressBar + 2;
       }
       j0.setValue(numberProgressBar);
       n0.setValue(StreetTankPercent);
@@ -605,13 +626,6 @@ void TurbidityCheck()
       q2.setPic(0);
       btnStart.Set_background_crop_picc(0);
       btnStart.Set_press_background_crop_picc2(1);
-
-      // Выводим количество импульсов за сеанс закачки
-      n3.setValue(CommulativeImpulses);
-
-      // Выводим количество литров за сеанс закачки
-      n4.setValue(CommulativeImpulses / litresKoeff);
-
       updateHMI = false;
     }
   }
@@ -628,7 +642,8 @@ void ScanImpulse()
     n3.setValue(CommulativeImpulses);
 
     // Выводим текущие показания литров
-    n4.setValue(CommulativeImpulses / litresKoeff);
+    n4.setValue(CommulativeImpulsesC / litresKoeff);
+    n5.setValue(CommulativeImpulsesD / litresKoeff);
 
     if (progress == 1) {
       q0.setPic(1); //digitalWrite(ledPin, HIGH);
@@ -665,7 +680,6 @@ void ScanImpulse()
   {
     TurnSkvajNasosOff();
   }
-
 }
 
 /* Процедуры управления силовой частью - РЕЛЕ - BEGIN */
@@ -774,21 +788,18 @@ void WriteStates()
 // Вывод страницы №1
 void page1()
 {
-  int level1, level2;
+  int level1;
   char dom[] = {char(180), char(222), char(220), '\0'};
-  char str[] = {char(195), char(219), char(216), char(230), char(208), '\0'};
+  String StrDT;
 
   //graphic commands to redraw the complete screen should be placed here
   u8g.drawRFrame(0, 0, 128, 16, 3);
 
   u8g.setFont(u8g_font_unifont_0_8);
-  u8g.setPrintPos(18, 12);
+  u8g.setPrintPos(50, 12);
   u8g.print(dom);
 
-  u8g.setPrintPos(72, 12);
-  u8g.print(str);
-  u8g.drawVLine(64, 0, 64);
-
+  u8g.drawVLine(61, 16, 48);
   u8g.setFont(u8g_font_profont22);
 
   //Уровень домашней емкости (граф.)
@@ -801,16 +812,18 @@ void page1()
   u8g.setPrintPos(6, 34);
   u8g.print(MainTankPercent);
 
-  //Уровень уличной емкости (граф.)
-  u8g.drawFrame(112, 18, 12, 46);
-  level2 = 44 * StreetTankPercent / 100;
-  if (level2 == 0) {
-    level2 = 1;
-  }
+  // Вывод на экран текущего времени
+  u8g.setFont(u8g_font_unifont_0_8);
+  u8g.setPrintPos(64, 29);
+  //StrDT = clock.dateFormat("H:i:s", dt);
+  u8g.print(dt.hour); u8g.print(":");
+  u8g.print(dt.minute); u8g.print(":");
+  u8g.print(dt.second);
 
-  u8g.drawBox(114, 20 + (44 - level2), 8, level2);
-  u8g.setPrintPos(68, 34);
-  u8g.print(StreetTankPercent);
+  u8g.setPrintPos(64, 43);
+  u8g.print(dt.day); u8g.print("-");
+  u8g.print(dt.month); u8g.print("-");
+  u8g.print(dt.year - 2000);
 
   /* -----------------------------  Иконка блокировки горячей воды --------------------------------- */
   if ((HotWaterTankIsBlocked == true) && (progress == 1))
@@ -820,19 +833,10 @@ void page1()
   /* END --------------------------  Иконка блокировки горячей воды ---------------------------- END */
 
   /* -------------------- Иконка и значение прозрачности воды в уличной емкости ---------------------*/
-  if ((StreetTank_WaterQuality < 90) && (progress == 1))
+  if ((wq_raw < 90) && (progress == 1))
   {
-    u8g.drawBitmapP(68, 38, 2, 10, ico_eye);
+    u8g.drawBitmapP(80, 53, 2, 10, ico_eye);
   }
-  else if (StreetTank_WaterQuality >= 90)
-  {
-    u8g.drawBitmapP(68, 38, 2, 10, ico_eye);
-  }
-
-  u8g.setColorIndex(1);
-  u8g.setFont(u8g_font_unifont_0_8);
-  u8g.setPrintPos(86, 49);
-  u8g.print(StreetTank_WaterQuality);
   /* END ---------------- Иконка и значение прозрачности воды в уличной емкости ---------------- END */
 
   //------------------ Статусы емкостей ------------------------------------------
@@ -841,30 +845,15 @@ void page1()
   }
 
   if (MainTankStatus == 2) {                                      // Анимация при наполнении
-    //u8g.setFont(u8g_font_unifont_0_8);
     u8g.drawBitmapP(14 + (8 * progress), 54, 1, 10, right_arrow);
-    //u8g.setPrintPos(14 + (8 * progress), 64);
-    //u8g.print(">");
   }
 
   if ((MainTankStatus == 4) && (progress == 1)) {                 // Мигающая иконка при ошибке
     u8g.drawBitmapP(6, 53, 2, 11, ico_err_status);
   }
 
-  if (StreetTankStatus == 1) {              // При нормальном статусе емкости - ОК
-    u8g.setFont(u8g_font_unifont_0_8);
-    u8g.drawBitmapP(68, 55, 1, 9, ico_ok_status);
-  }
-
-  if (StreetTankStatus == 2) {              // При наполнении анимация
-    //    u8g.setFont(u8g_font_unifont_0_8);
-    //    u8g.setPrintPos(68 + (8 * progress), 64);
-    //    u8g.print(">");
-    u8g.drawBitmapP(68 + (8 * progress), 54, 1, 10, right_arrow);
-  }
-
   if ((StreetTankStatus == 4) && (progress == 1)) {              // При ошибке анимация
-    u8g.drawBitmapP(68, 53, 2, 11, ico_err_status);
+    u8g.drawBitmapP(64, 53, 2, 11, ico_err_status);
   }
 
   // Отображение стрелок перехода по страницам
@@ -914,27 +903,14 @@ void page2()
     u8g.print(char(176));
   }
 
-  if (tmpChange == false)
-  {
-    // Иконка термометра №3 - температура камней в каменке
-    u8g.drawBitmapP(62, 45, 2, 16, ico_stones_temp);
+  // Иконка термометра №3 - температура камней в каменке
+  u8g.drawBitmapP(62, 45, 2, 16, ico_stones_temp);
 
-    // Значение температуры камней
-    u8g.setFont(u8g_font_profont22);
-    u8g.setPrintPos(82, 61);
-    u8g.print(sauna_stones_Temp);
-    u8g.print(char(176));
-  }
-  else
-  {
-    // Иконка термометра №1 - тем.воздуха
-    u8g.drawBitmapP(62, 45, 2, 16, ico_air_temp);
-    // Значение температуры улицы
-    u8g.setFont(u8g_font_profont22);
-    u8g.setPrintPos(82, 61);
-    u8g.print(street_Temp);
-    u8g.print(char(176));
-  }
+  // Значение температуры камней
+  u8g.setFont(u8g_font_profont22);
+  u8g.setPrintPos(82, 61);
+  u8g.print(sauna_stones_Temp);
+  u8g.print(char(176));
 
   // Уровень емкости с горячей водой (градация 0-50-100%) - всего три уровня
   u8g.drawFrame(48, 18, 12, 46);
@@ -1045,16 +1021,11 @@ void page2()
 void SystemCounters()
 {
   unsigned long currentMillis       =  millis();
-  //currentMillis = millis();
 
   /* Управление уровнем яркости LCD дисплея - вход в "спящий режим" */
   if ((currentMillis - previousMillisBLK >= BrightnessInterval) && (SleepMode == false)) {
     previousMillisBLK = currentMillis;
     LED12864_Brightness(SleepBrightness);
-    //nexSerial.print("dim=40");
-    //nexSerial.write(0XFF);
-    //nexSerial.write(0XFF);
-    //nexSerial.write(0XFF);
     SleepMode = true;
   }
 
@@ -1101,10 +1072,7 @@ void ProcessButtons()
       LongTapNext = 1;
       SleepMode = false;
       LED12864_Brightness(WorkBrightness);
-      nexSerial.print("dim=100");
-      nexSerial.write(0XFF);
-      nexSerial.write(0XFF);
-      nexSerial.write(0XFF);
+      setMaxBrightnessNex();
       tm0.enable();
       previousMillisBLK = millis();
     }
@@ -1113,23 +1081,6 @@ void ProcessButtons()
   if ((NextPageButtonState == HIGH) && (LongTapNext == 1)) {        // Кнопка отжата
     LongTapNext = 0;
   }
-
-  //  int PrevPageButtonState = digitalRead(PrevPageButtonPin);
-  //  if ((PrevPageButtonState == LOW) && (LongTapPrev == 0))           // Кнопка нажата
-  //  {
-  //    LongTapPrev = 1;
-  //    CurrentPage--;
-  //
-  //    if (CurrentPage < 1)
-  //    {
-  //      CurrentPage = 4;
-  //    }
-  //  }
-  //
-  //  if ((PrevPageButtonState == HIGH) && (LongTapPrev == 1)) {        // Кнопка отжата
-  //    LongTapPrev = 0;
-  //  }
-
 }
 
 // Условия для вывода нужной страницы на LCD
@@ -1152,28 +1103,6 @@ void ProcessPages()
       page2();                    // Отображение страницы №2 на LCD
     } while ( u8g.nextPage() );
   }
-
-  //  if (CurrentPage == 3)
-  //  {
-  //    u8g.sleepOff();
-  //    u8g.firstPage();
-  //    do {
-  //      //Блок отображения страницы №3 на OLED
-  //      SleepPage();
-  //
-  //    } while ( u8g.nextPage() );
-  //  }
-
-  //  if (CurrentPage == 4)
-  //  {
-  //    u8g.setContrast(1);
-  //    u8g.firstPage();
-  //    do {
-  //      //Блок отображения страницы №4 на OLED (Sleep - пока что здесь режим сна)
-  //      SleepPage();
-  //
-  //    } while ( u8g.nextPage() );
-  //  }
 }
 
 // Отображение на страницах стрелок меню "Влево"/"Вправо"
@@ -1272,19 +1201,48 @@ void Logic_StreetTank()
 void Logic_HotWaterTank()
 {
   // Наполнение
-  if (HotWaterTankPercent < 2)
+
+  if (HotWaterTankIsBlocked == false)
   {
-    if (HotWaterTankIsBlocked == false)
+    if (((HotWaterTankPercent < 2) && (sauna_water_Temp < 40)) || (HotWaterTankPercent <= 1))
     {
       TurnOn(HotWaterTankRelay);      // Открываем электромагнитный клапан
       HotWaterTankStatus = 2;         // Состояние емкости "Наполнение"
     }
-    else
-    {
-      TurnOff(HotWaterTankRelay);     // Закрываем электромагнитный клапан
-      HotWaterTankStatus = 4;         // Состояние емкости "Ошибка"
-    }
   }
+  else
+  {
+    TurnOff(HotWaterTankRelay);     // Закрываем электромагнитный клапан
+    HotWaterTankStatus = 4;         // Состояние емкости "Ошибка"
+  }
+
+  //  if ((HotWaterTankPercent < 2) || (sauna_water_Temp < 40))
+  //  {
+  //    if (HotWaterTankIsBlocked == false)
+  //    {
+  //      TurnOn(HotWaterTankRelay);      // Открываем электромагнитный клапан
+  //      HotWaterTankStatus = 2;         // Состояние емкости "Наполнение"
+  //    }
+  //    else
+  //    {
+  //      TurnOff(HotWaterTankRelay);     // Закрываем электромагнитный клапан
+  //      HotWaterTankStatus = 4;         // Состояние емкости "Ошибка"
+  //    }
+  //  }
+  //
+  //  if (HotWaterTankPercent <= 1)
+  //  {
+  //    if (HotWaterTankIsBlocked == false)
+  //    {
+  //      TurnOn(HotWaterTankRelay);      // Открываем электромагнитный клапан
+  //      HotWaterTankStatus = 2;         // Состояние емкости "Наполнение"
+  //    }
+  //    else
+  //    {
+  //      TurnOff(HotWaterTankRelay);     // Закрываем электромагнитный клапан
+  //      HotWaterTankStatus = 4;         // Состояние емкости "Ошибка"
+  //    }
+  //  }
 
   // Достигнут максимальный уровень
   if (HotWaterTankPercent == 3)
@@ -1297,7 +1255,7 @@ void Logic_HotWaterTank()
 // Проверка условий прозрачности воды в уличной емкости
 void CheckWaterQuality()
 {
-  if (StreetTank_WaterQuality < 90)
+  if (wq_raw < 90)
   {
     StreetTankStatus = 4;
   }
@@ -1317,10 +1275,10 @@ void LED12864_Brightness(int BL_brightness)
 }
 
 // Температура в доме
-void HomeAirTemp()
-{
-  //home_air_Temp = clock.readTemperature();
-}
+//void HomeAirTemp()
+//{
+// home_air_Temp = clock.readTemperature();
+//}
 
 // Температура бака с горячей водой
 // также применяем коэффициент сглаживания показаний (как и при работе с ультразвуковыми датчиками) - для устранения "шума"
@@ -1370,23 +1328,7 @@ void i2cReadSlave()
     sauna_air_Temp    = respVals[6];
     sauna_water_Temp  = respVals[7];
     street_Temp       = respVals[8];
-    home_air_Temp     = respVals[9];
+    //home_air_Temp     = respVals[9]; - можно использовать на что то другое - теперь температура на Мастере
     //Serial.println(street_Temp);
   }
-}
-
-// Получение уровня домашней емкости в %
-void StreetTankWaterQualityCheck()
-{
-  int oldsensorValue = StreetTank_WaterQuality;
-  //  Serial.print("STQ_raw: ");
-  //  Serial.print(wq_raw);
-  //  Serial.println();
-
-  StreetTank_WaterQuality  = wq_raw;
-  StreetTank_WaterQuality  = (oldsensorValue * (averageFactor - 1) + StreetTank_WaterQuality) / averageFactor;
-
-  //  Serial.print("STQ: ");
-  //  Serial.print(StreetTank_WaterQuality);
-  //  Serial.println();
 }
