@@ -139,19 +139,19 @@ const uint8_t ico_stones_temp[] U8G_PROGMEM =
   0xFF, 0xFC, // ##############
 };
 
-const uint8_t left_arrow[] U8G_PROGMEM = {
-  // @0 '3' (5 pixels wide)
-  0x08, //     #
-  0x18, //    ##
-  0x38, //   ###
-  0x78, //  ####
-  0xF8, // #####
-  0xF8, // #####
-  0x78, //  ####
-  0x38, //   ###
-  0x18, //    ##
-  0x08, //     #
-};
+//const uint8_t left_arrow[] U8G_PROGMEM = {
+//  // @0 '3' (5 pixels wide)
+//  0x08, //     #
+//  0x18, //    ##
+//  0x38, //   ###
+//  0x78, //  ####
+//  0xF8, // #####
+//  0xF8, // #####
+//  0x78, //  ####
+//  0x38, //   ###
+//  0x18, //    ##
+//  0x08, //     #
+//};
 
 const uint8_t right_arrow[] U8G_PROGMEM = {
   // @10 '4' (5 pixels wide)
@@ -262,6 +262,7 @@ unsigned long previousMillisSKV   = 0;       // Переменная для хр
 const int minTurbidity            = 250;     // Минимальное значение прозрачности (всё что меньше будет сливаться в дренаж)
 
 int impulses              = 0;          // Переменная для подсчета импульсов внутри интервала (10 сек).
+int oldimpulses           = 0;          // Переменная для временного хранения импульсов с целью задержки переключения с грязной воды на чистую
 int CommulativeImpulses   = 0;          // Накопительный счетчик импульсов - собирается за сеанс "откачки" (от старта до стопа!)
 int CommulativeImpulsesD  = 0;          // Накопительный счетчик импульсов грязной воды
 int CommulativeImpulsesC  = 0;          // Накопительный счетчик импульсов чистой воды
@@ -600,19 +601,22 @@ void TurbidityCheck()
 {
   if (SkvajNasos == true)
   {
-
     Turbidity = analogRead(TurbiditySensorPin);
     if (Turbidity < minTurbidity)
     {
+      oldimpulses = CommulativeImpulses;
       DirtyWater();
       q1.setPic(0);
       q2.setPic(1);
     }
     else
     {
-      CleanWater();
-      q1.setPic(1);
-      q2.setPic(0);
+      if (CommulativeImpulses - oldimpulses >= (litresKoeff * 2))
+      {
+        CleanWater();
+        q1.setPic(1);
+        q2.setPic(0);
+      }
     }
     //Serial.println(Turbidity);
   }
@@ -692,13 +696,13 @@ void TurnSkvajNasosOff() {
 }
 
 void DirtyWater() {
-  TurnOn(DirtyWaterRelay);
   TurnOff(CleanWaterRelay);
+  TurnOn(DirtyWaterRelay);
 }
 
 void CleanWater() {
-  TurnOn(CleanWaterRelay);
   TurnOff(DirtyWaterRelay);
+  TurnOn(CleanWaterRelay);
 }
 
 void CloseWaterValves() {
@@ -857,7 +861,7 @@ void page1()
   }
 
   // Отображение стрелок перехода по страницам
-  DrawMenuArrows();
+  //DrawMenuArrows();
 }
 
 // Вывод страницы №2
@@ -964,7 +968,7 @@ void page2()
     //  u8g.print(text_buffer); */
 
   // Отображение стрелок перехода по страницам
-  DrawMenuArrows();
+  //DrawMenuArrows();
 }
 
 // Вывод страницы №3
@@ -1059,23 +1063,25 @@ void ProcessButtons()
   {
     if (SleepMode == false)
     {
-      LongTapNext = 1;
+      //LongTapNext = 1;
       CurrentPage++;
 
       if (CurrentPage > 2) {
         CurrentPage = 1;
       }
-      previousMillisBLK = millis();
+      //previousMillisBLK = millis();
     }
     else
     {
-      LongTapNext = 1;
+      //LongTapNext = 1;
       SleepMode = false;
       LED12864_Brightness(WorkBrightness);
       setMaxBrightnessNex();
       tm0.enable();
-      previousMillisBLK = millis();
+      //previousMillisBLK = millis();
     }
+    LongTapNext = 1;
+    previousMillisBLK = millis();
   }
 
   if ((NextPageButtonState == HIGH) && (LongTapNext == 1)) {        // Кнопка отжата
@@ -1106,12 +1112,12 @@ void ProcessPages()
 }
 
 // Отображение на страницах стрелок меню "Влево"/"Вправо"
-void DrawMenuArrows()
-{
-  // Отображение стрелок перехода по страницам
-  u8g.drawBitmapP( 6 - progress, 3, 1, 10, left_arrow);
-  u8g.drawBitmapP( 117 + progress, 3, 1, 10, right_arrow);
-}
+//void DrawMenuArrows()
+//{
+//  // Отображение стрелок перехода по страницам
+//  u8g.drawBitmapP( 6 - progress, 3, 1, 10, left_arrow);
+//  u8g.drawBitmapP( 117 + progress, 3, 1, 10, right_arrow);
+//}
 
 /* ----------------------- БЛОК ЛОГИКИ ЕМКОСТЕЙ ---------------------------- */
 // Логика уровней/событий домашней емкости
