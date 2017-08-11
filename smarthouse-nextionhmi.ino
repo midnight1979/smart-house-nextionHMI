@@ -1204,7 +1204,16 @@ void Logic_HotWaterTank()
 
   if (HotWaterTankIsBlocked == false)
   {
-    if (((HotWaterTankPercent < 2) && (sauna_water_Temp < 40)) || (HotWaterTankPercent <= 1))
+    if (HotWaterTankPercent < 2)
+    {
+      if (sauna_water_Temp < 40)
+      {
+        TurnOn(HotWaterTankRelay);      // Открываем электромагнитный клапан
+        HotWaterTankStatus = 2;         // Состояние емкости "Наполнение"
+      }
+
+    }
+    else if (HotWaterTankPercent < 1)
     {
       TurnOn(HotWaterTankRelay);      // Открываем электромагнитный клапан
       HotWaterTankStatus = 2;         // Состояние емкости "Наполнение"
